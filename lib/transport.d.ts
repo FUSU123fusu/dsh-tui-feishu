@@ -121,8 +121,8 @@ export declare class LarkTransport {
     onMessage(handler: (message: FeishuMessage) => void): void;
     /** Register the single card-button handler. */
     onCardAction(handler: (action: FeishuCardAction) => void): void;
-    /** Download an inbound image message's bytes by its `image_key`. */
-    downloadImage(imageKey: string): Promise<DownloadedImage | undefined>;
+    /** Download an inbound image message's bytes by its message id + image key. */
+    downloadImage(messageId: string, imageKey: string): Promise<DownloadedImage | undefined>;
     /** Send a plain text message to a chat. */
     sendText(chatId: string, text: string): Promise<void>;
     /** Send an interactive card; resolves with the created message id. */
