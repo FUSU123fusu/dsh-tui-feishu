@@ -252,6 +252,8 @@ export class Bridge {
   private readonly counters = { received: 0, delivered: 0, dropped: 0 }
   /** Per-chat serialization of inbound work (messages AND commands). */
   private readonly chatChains = new Map<string, Promise<void>>()
+  /** Non-bridge sessions already logged about (once each, not per event). */
+  private readonly foreignSessions = new Set<string>()
 
   constructor(private readonly options: BridgeOptions) {}
 
@@ -286,7 +288,14 @@ export class Bridge {
         // card and be dropped silently (the flaky "tool panel pushed").
         const chatId = this.options.sessionMap.chatFor(sessionId)
         if (chatId === undefined) {
-          this.options.logger.warn(`session event for unknown session ${sessionId} ignored (chatFor miss)`)
+          // The subscription is host-wide: the TUI's own interactive sessions
+          // land here too. Log once per session, not once per event (chunk-
+          // level events would otherwise spam bridge.log).
+          if (!this.foreignSessions.has(sessionId)) {
+            if (this.foreignSessions.size > 256) this.foreignSessions.clear()
+            this.foreignSessions.add(sessionId)
+            this.options.logger.info(`ignoring events for non-bridge session ${sessionId}`)
+          }
           return
         }
         void this.enqueueChat(chatId, () => this.handleSessionEvent(sessionId, event))

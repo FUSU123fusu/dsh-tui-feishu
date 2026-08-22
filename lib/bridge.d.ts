@@ -113,6 +113,8 @@ export declare class Bridge {
     private readonly counters;
     /** Per-chat serialization of inbound work (messages AND commands). */
     private readonly chatChains;
+    /** Non-bridge sessions already logged about (once each, not per event). */
+    private readonly foreignSessions;
     constructor(options: BridgeOptions);
     /** Inbound-message counters for the /feishu status surface. */
     stats(): {
