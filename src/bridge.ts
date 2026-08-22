@@ -118,7 +118,19 @@ export interface BridgeOptions {
   readonly resolveInboundImage?: (messageId: string, imageKey: string) => Promise<InboundImageResult | undefined>
   /** Render reasoning/thinking rows on cards (default true). */
   readonly showReasoning?: boolean
+  /**
+   * Debounce window for merging rapid consecutive messages (text and images)
+   * into ONE turn: an image followed by its caption, or several quick texts,
+   * arrive as a single user message instead of each firing its own turn.
+   * 0/undefined delivers every message immediately.
+   */
+  readonly batchWindowMs?: number
 }
+
+/** One buffered inbound message awaiting the batch window. */
+type PendingItem =
+  | { readonly kind: 'text'; readonly text: string }
+  | { readonly kind: 'image'; readonly messageId: string; readonly imageKey: string }
 
 /** One chat's live turn-card state (bridge-owned). */
 interface TurnState {
@@ -271,6 +283,8 @@ export class Bridge {
   private readonly counters = { received: 0, delivered: 0, dropped: 0 }
   /** Per-chat serialization of inbound work (messages AND commands). */
   private readonly chatChains = new Map<string, Promise<void>>()
+  /** Buffered messages per chat awaiting the batch window (debounce). */
+  private readonly pendingBatches = new Map<string, { items: PendingItem[]; timer?: ReturnType<typeof setTimeout> }>()
   /** Non-bridge sessions already logged about (once each, not per event). */
   private readonly foreignSessions = new Set<string>()
 
@@ -325,6 +339,10 @@ export class Bridge {
   /** Tear the bridge down: settle approvals as cancelled, drop listeners. */
   async dispose(): Promise<void> {
     for (const dispose of this.turnDisposers.splice(0)) dispose()
+    for (const batch of this.pendingBatches.values()) {
+      if (batch.timer !== undefined) clearTimeout(batch.timer)
+    }
+    this.pendingBatches.clear()
     for (const pending of this.approvals.values()) {
       if (!pending.settled) pending.resolve('cancelled')
     }
@@ -374,10 +392,11 @@ export class Bridge {
     const text = message.text.trim()
     if (message.imageKey !== undefined && message.imageKey !== '') {
       this.counters.delivered += 1
-      // Same per-chat chain as text: an image arriving while a turn is
-      // being set up must not race ensureAgent / the card open either.
-      const imageKey = message.imageKey
-      return this.enqueueChat(message.chatId, () => this.deliverImage(message.chatId, message.messageId, imageKey))
+      return this.addToBatch(message.chatId, {
+        kind: 'image',
+        messageId: message.messageId,
+        imageKey: message.imageKey,
+      })
     }
     if (text === '') {
       this.counters.dropped += 1
@@ -391,9 +410,77 @@ export class Bridge {
     // map entry. Commands (/new, /switch) mutate the same state, so they
     // go through the same chain.
     if (text.startsWith('/')) {
+      // Commands act on the state the user SEES: flush any pending batch
+      // first so a typed message lands before /new, /switch etc. run.
+      this.flushBatch(message.chatId)
       return this.enqueueChat(message.chatId, () => this.handleCommand(message.chatId, text))
     }
-    return this.enqueueChat(message.chatId, () => this.deliver(message.chatId, text))
+    return this.addToBatch(message.chatId, { kind: 'text', text })
+  }
+
+  /**
+   * Route one inbound message: with a batch window configured, buffer it and
+   * (re)arm the debounce timer - rapid consecutive messages merge into one
+   * turn (an image plus its caption is the motivating case). Without a
+   * window, deliver immediately on the per-chat chain.
+   */
+  private addToBatch(chatId: string, item: PendingItem): Promise<void> {
+    const windowMs = this.options.batchWindowMs ?? 0
+    if (windowMs <= 0) {
+      return this.enqueueChat(chatId, () => this.deliverBatch(chatId, [item]))
+    }
+    let batch = this.pendingBatches.get(chatId)
+    if (batch === undefined) {
+      batch = { items: [] }
+      this.pendingBatches.set(chatId, batch)
+    }
+    batch.items.push(item)
+    if (batch.timer !== undefined) clearTimeout(batch.timer)
+    batch.timer = setTimeout(() => this.flushBatch(chatId), windowMs)
+    batch.timer.unref?.()
+    return Promise.resolve()
+  }
+
+  /** Flush the chat's buffered messages now (debounce timer or pre-command). */
+  private flushBatch(chatId: string): void {
+    const batch = this.pendingBatches.get(chatId)
+    if (batch === undefined) return
+    this.pendingBatches.delete(chatId)
+    if (batch.timer !== undefined) clearTimeout(batch.timer)
+    const items = batch.items
+    void this.enqueueChat(chatId, () => this.deliverBatch(chatId, items))
+  }
+
+  /**
+   * Deliver one debounced batch as a single turn. Single-item batches take
+   * the classic paths (unchanged behavior); multi-item batches resolve every
+   * image and combine all blocks in arrival order. An image that fails to
+   * resolve gets its usual guidance reply and is skipped; when nothing
+   * deliverable remains, no turn starts.
+   */
+  private async deliverBatch(chatId: string, items: readonly PendingItem[]): Promise<void> {
+    const first = items[0]
+    if (first === undefined) return
+    if (items.length === 1) {
+      if (first.kind === 'text') return this.deliver(chatId, first.text)
+      return this.deliverImage(chatId, first.messageId, first.imageKey)
+    }
+    const blocks: Record<string, unknown>[] = []
+    let title: string | undefined
+    for (const item of items) {
+      if (item.kind === 'text') {
+        title ??= item.text
+        blocks.push({ type: 'text', text: item.text })
+        continue
+      }
+      // Batched images skip the auto caption - the user's own text is it.
+      const imageBlocks = await this.resolveImageBlocks(chatId, item.messageId, item.imageKey, false)
+      if (imageBlocks === null) continue
+      title ??= '📷 图片'
+      blocks.push(...imageBlocks)
+    }
+    if (blocks.length === 0) return
+    await this.deliver(chatId, title ?? '📷 图片', blocks)
   }
 
   /**
@@ -417,11 +504,28 @@ export class Bridge {
 
   /** Materialize and deliver an inbound image message to the chat's agent. */
   private async deliverImage(chatId: string, messageId: string, imageKey: string): Promise<void> {
+    const blocks = await this.resolveImageBlocks(chatId, messageId, imageKey, true)
+    if (blocks === null) return
+    await this.deliver(chatId, '📷 图片', blocks)
+  }
+
+  /**
+   * Resolve one inbound image into message blocks; replies guidance and
+   * returns null when image receive is off, the resolver is missing, or the
+   * download failed. `caption` adds the '📷 用户发来一张图片' text block
+   * (single-image turns; batches let the user's own text caption it).
+   */
+  private async resolveImageBlocks(
+    chatId: string,
+    messageId: string,
+    imageKey: string,
+    caption: boolean,
+  ): Promise<Record<string, unknown>[] | null> {
     const resolve = this.options.resolveInboundImage
     if (this.options.receiveImages === false || resolve === undefined) {
       this.options.logger.warn(`inbound image ignored (receiveImages=${this.options.receiveImages === false ? 'off' : 'unavailable'})`)
       await this.options.transport.sendText(chatId, '📷 当前未开启图片接收（或宿主不支持）。')
-      return
+      return null
     }
     let result: InboundImageResult | undefined
     try {
@@ -434,16 +538,17 @@ export class Bridge {
         chatId,
         '📷 图片接收失败（下载出错）——请重试；若持续失败可在 TUI 里看日志。',
       )
-      return
+      return null
     }
-    const blocks: { type: string; [key: string]: unknown }[] =
-      result.kind === 'attachment'
+    if (result.kind === 'attachment') {
+      return caption
         ? [
             { type: 'image', attachment: result.ref },
             { type: 'text', text: '📷 用户发来一张图片。' },
           ]
-        : [{ type: 'text', text: `📷 用户发来一张图片，已保存到 ${result.path}（如需查看可用 read_image 读取）。` }]
-    await this.deliver(chatId, '📷 图片', blocks)
+        : [{ type: 'image', attachment: result.ref }]
+    }
+    return [{ type: 'text', text: `📷 用户发来一张图片，已保存到 ${result.path}（如需查看可用 read_image 读取）。` }]
   }
 
   private async handleCommand(chatId: string, line: string): Promise<void> {

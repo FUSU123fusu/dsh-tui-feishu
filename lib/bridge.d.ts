@@ -115,6 +115,13 @@ export interface BridgeOptions {
     readonly resolveInboundImage?: (messageId: string, imageKey: string) => Promise<InboundImageResult | undefined>;
     /** Render reasoning/thinking rows on cards (default true). */
     readonly showReasoning?: boolean;
+    /**
+     * Debounce window for merging rapid consecutive messages (text and images)
+     * into ONE turn: an image followed by its caption, or several quick texts,
+     * arrive as a single user message instead of each firing its own turn.
+     * 0/undefined delivers every message immediately.
+     */
+    readonly batchWindowMs?: number;
 }
 /** One-line summary of a tool call for the activity rows. */
 export declare function toolRowSummary(name: string, argsJson: string): string;
@@ -134,6 +141,8 @@ export declare class Bridge {
     private readonly counters;
     /** Per-chat serialization of inbound work (messages AND commands). */
     private readonly chatChains;
+    /** Buffered messages per chat awaiting the batch window (debounce). */
+    private readonly pendingBatches;
     /** Non-bridge sessions already logged about (once each, not per event). */
     private readonly foreignSessions;
     constructor(options: BridgeOptions);
@@ -154,6 +163,23 @@ export declare class Bridge {
     private dedupe;
     private handleIncoming;
     /**
+     * Route one inbound message: with a batch window configured, buffer it and
+     * (re)arm the debounce timer - rapid consecutive messages merge into one
+     * turn (an image plus its caption is the motivating case). Without a
+     * window, deliver immediately on the per-chat chain.
+     */
+    private addToBatch;
+    /** Flush the chat's buffered messages now (debounce timer or pre-command). */
+    private flushBatch;
+    /**
+     * Deliver one debounced batch as a single turn. Single-item batches take
+     * the classic paths (unchanged behavior); multi-item batches resolve every
+     * image and combine all blocks in arrival order. An image that fails to
+     * resolve gets its usual guidance reply and is skipped; when nothing
+     * deliverable remains, no turn starts.
+     */
+    private deliverBatch;
+    /**
      * Run one chat's inbound tasks one-at-a-time, in arrival order. Failures
      * are logged and swallowed so one bad task never jams the chain; the chain
      * entry is dropped once the tail settles.
@@ -161,6 +187,13 @@ export declare class Bridge {
     private enqueueChat;
     /** Materialize and deliver an inbound image message to the chat's agent. */
     private deliverImage;
+    /**
+     * Resolve one inbound image into message blocks; replies guidance and
+     * returns null when image receive is off, the resolver is missing, or the
+     * download failed. `caption` adds the '📷 用户发来一张图片' text block
+     * (single-image turns; batches let the user's own text caption it).
+     */
+    private resolveImageBlocks;
     private handleCommand;
     /** Best-effort persist of the session map (never breaks a command). */
     private persistMap;

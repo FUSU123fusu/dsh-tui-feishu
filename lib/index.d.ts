@@ -50,6 +50,9 @@ export interface Config {
     readonly cardEngine?: 'v1' | 'cardkit';
     /** Show reasoning/thinking rows on cards (default true). */
     readonly showReasoning?: boolean;
+    /** Merge rapid consecutive messages (e.g. an image + its caption) into one
+     *  turn within this debounce window in ms (default 4000; 0 disables). */
+    readonly batchWindowMs?: number;
     /** Allowed Feishu sender open ids; empty serves every p2p sender. */
     readonly allowedUsers?: string[];
 }

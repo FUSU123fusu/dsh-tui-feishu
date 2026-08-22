@@ -62,6 +62,7 @@ dsh plugin --profile dsh-tui add file:dsh-tui-feishu-0.3.1.tgz
 飞书里私聊机器人：
 
 - 发任何消息 = 给 agent 下指令，回复以流式卡片实时更新（思考/工具行 + 正文 + ⏹ Stop 按钮）
+- 快速连发的消息会合并成一个回合：先发图片再补一句说明（或连发几条文字），约 4 秒内到达的消息作为一条用户消息一起投递（`batchWindowMs` 可调，0 关闭）
 - `/new` 开新会话（旧会话留在磁盘上）；`/status` 看桥接状态；`/help` 帮助
 - 会话跨重启持久化：`$DSH_HOME/dsh-tui-feishu/session-map.json` 记录 飞书会话 ↔ dsh session 绑定，重启后自动 `agents.resume()` 恢复
 

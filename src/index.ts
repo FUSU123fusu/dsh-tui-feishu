@@ -80,6 +80,9 @@ export interface Config {
   readonly cardEngine?: 'v1' | 'cardkit'
   /** Show reasoning/thinking rows on cards (default true). */
   readonly showReasoning?: boolean
+  /** Merge rapid consecutive messages (e.g. an image + its caption) into one
+   *  turn within this debounce window in ms (default 4000; 0 disables). */
+  readonly batchWindowMs?: number
   /** Allowed Feishu sender open ids; empty serves every p2p sender. */
   readonly allowedUsers?: string[]
 }
@@ -98,6 +101,7 @@ export const Config: z<Config> = z.object({
   receiveImages: z.boolean().required(false),
   cardEngine: z.union([z.const('v1'), z.const('cardkit')]).required(false),
   showReasoning: z.boolean().required(false),
+  batchWindowMs: z.natural().required(false),
   allowedUsers: z.array(z.string()).required(false),
 })
 
@@ -554,6 +558,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       ...(config.resolveImages === undefined ? {} : { resolveImages: config.resolveImages }),
       ...(config.receiveImages === undefined ? {} : { receiveImages: config.receiveImages }),
       ...(config.showReasoning === undefined ? {} : { showReasoning: config.showReasoning }),
+      batchWindowMs: config.batchWindowMs ?? 4000,
       ...(allowed.length === 0 ? {} : { allowedUsers: allowed }),
       resolveInboundImage,
     })
