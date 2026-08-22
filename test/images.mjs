@@ -10,12 +10,35 @@ import { StreamingCardManager } from '../lib/cards.js'
 import { normalizeMessageEvent, sniffImageMediaType, asFeishuError } from '../lib/transport.js'
 
 let passed = 0
+const pending = []
 const ok = (name, fn) => {
-  fn()
+  const result = fn()
+  if (result instanceof Promise) {
+    // Async cases: defer the pass log until the promise settles, so a failed
+    // assertion rejects the run deterministically instead of escaping into
+    // an uncaught rejection after the summary line.
+    pending.push(
+      result.then(() => {
+        passed += 1
+        console.log(`${name}: true`)
+      }),
+    )
+    return
+  }
   passed += 1
   console.log(`${name}: true`)
 }
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+// Condition-based wait: delivery goes through the bridge's per-chat promise
+// chain plus real disk I/O (session-map persist), so a fixed 20ms sleep is
+// machine-dependent. Poll for the actual outcome instead.
+const waitFor = async (cond, timeoutMs = 2000) => {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (cond()) return
+    await sleep(10)
+  }
+}
 
 // ── transport normalization ────────────────────────────────────────────
 ok('normalizes image messages with the image key', () => {
@@ -133,7 +156,7 @@ ok('image message delivers an attachment block to the agent', async () => {
     },
   })
   await transport._h(imageEvent('img-msg-1', 'img_v3_1'))
-  await sleep(20)
+  await waitFor(() => fakeAgent.sent.length > 0)
   assert.deepEqual(resolvedArgs, ['img-msg-1', 'img_v3_1'], 'resolver gets (messageId, imageKey)')
   const content = fakeAgent.sent.at(-1)?.content ?? []
   assert.ok(Array.isArray(content))
@@ -150,7 +173,7 @@ ok('image message falls back to a file path', async () => {
     resolveInboundImage: async () => ({ kind: 'file', path: '/data/images/1.png' }),
   })
   await transport._h(imageEvent('img2', 'img_v3_2'))
-  await sleep(20)
+  await waitFor(() => fakeAgent.sent.length > 0)
   const content = fakeAgent.sent.at(-1)?.content ?? []
   assert.ok(JSON.stringify(content).includes('/data/images/1.png'), 'file path delivered')
   assert.ok(!JSON.stringify(content).includes('"type":"image"'), 'no image block in file mode')
@@ -164,7 +187,7 @@ ok('receiveImages=false replies instead of delivering', async () => {
     resolveInboundImage: async () => ({ kind: 'attachment', ref: { attachmentId: 'a', mediaType: 'image/png', bytes: 1, width: 1, height: 1 } }),
   })
   await transport._h(imageEvent('img3', 'img_v3_3'))
-  await sleep(20)
+  await waitFor(() => transport.sent.some(m => m.text !== undefined && m.text.includes('图片接收')))
   assert.equal(fakeAgent.sent.length, 0, 'agent untouched')
   assert.ok(transport.sent.some(m => m.text !== undefined && m.text.includes('图片接收')), 'explains images are off')
   assert.equal(sessionMap.get('oc_1'), undefined, 'no session minted for an ignored image')
@@ -179,7 +202,7 @@ ok('resolver failure replies with guidance', async () => {
     },
   })
   await transport._h(imageEvent('img4', 'img_v3_4'))
-  await sleep(20)
+  await waitFor(() => transport.sent.some(m => m.text !== undefined && m.text.includes('图片接收失败')))
   assert.equal(fakeAgent.sent.length, 0)
   assert.ok(transport.sent.some(m => m.text !== undefined && m.text.includes('图片接收失败')), 'replies with a guidance message')
   bridge.dispose()
@@ -191,7 +214,7 @@ ok('resolver returning undefined also replies with guidance', async () => {
     resolveInboundImage: async () => undefined,
   })
   await transport._h(imageEvent('img5', 'img_v3_5'))
-  await sleep(20)
+  await waitFor(() => transport.sent.some(m => m.text !== undefined && m.text.includes('图片接收失败')))
   assert.equal(fakeAgent.sent.length, 0)
   assert.ok(transport.sent.some(m => m.text !== undefined && m.text.includes('图片接收失败')))
   bridge.dispose()
@@ -207,4 +230,5 @@ ok('asFeishuError decodes binary (Buffer/ArrayBuffer) error bodies', () => {
   assert.ok(folded.message.includes('Invalid request param.'))
 })
 
+await Promise.all(pending)
 console.log(`IMAGES OK (${passed} checks)`)

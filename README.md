@@ -34,7 +34,7 @@ npm run verify && npm pack
 dsh plugin --profile dsh-tui add file:dsh-tui-feishu-0.3.1.tgz
 ```
 
-> 也可以直接从 [GitHub Releases](https://github.com/Easyhoov/dsh-tui-feishu/releases) 下载最新 tgz。
+> 也可以直接从 [GitHub Releases](https://github.com/FUSU123fusu/dsh-tui-feishu/releases) 下载最新 tgz。
 
 ## 扫码配对（推荐）
 
