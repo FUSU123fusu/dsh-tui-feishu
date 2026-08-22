@@ -38,8 +38,6 @@ export interface FeishuMessage {
   readonly chatType: 'p2p' | 'group'
   readonly senderOpenId: string
   readonly text: string
-  /** Open ids of users @-mentioned in the message (bot excluded by caller). */
-  readonly mentions: readonly string[]
 }
 
 /** A normalized card-button callback. */
@@ -157,11 +155,7 @@ export function normalizeMessageEvent(data: RawMessageEvent): FeishuMessage | un
     chatType: message.chat_type === 'group' ? 'group' : 'p2p',
     senderOpenId,
     text,
-    mentions: (message.mentions ?? [])
-      .map(mention => mention.id?.open_id)
-      .filter((id): id is string => id !== undefined && id !== ''),
-    createdAt: Number(message.create_time) || Date.now(),
-  } as FeishuMessage
+  }
 }
 
 /**
@@ -245,7 +239,6 @@ export class LarkTransport {
   private actionHandler: ((action: FeishuCardAction) => void) | undefined
   private readonly logger: TransportLogger | undefined
   private connectionStateValue: 'starting' | 'ready' | 'reconnecting' | 'error' = 'starting'
-  private botOpenIdValue: string | undefined
 
   constructor(credentials: FeishuCredentials, logger?: TransportLogger) {
     this.logger = logger
@@ -307,9 +300,6 @@ export class LarkTransport {
       },
     })
     await this.ws.start({ eventDispatcher: this.dispatcher })
-    void this.resolveBotOpenId().catch((error: unknown) => {
-      this.logger?.warn(`bot open id resolution failed: ${String(error)}`)
-    })
   }
 
   /** Close the long connection. */
@@ -325,11 +315,6 @@ export class LarkTransport {
   /** Register the single card-button handler. */
   onCardAction(handler: (action: FeishuCardAction) => void): void {
     this.actionHandler = handler
-  }
-
-  /** The bot's own open id, or `undefined` until resolved. */
-  getBotOpenId(): string | undefined {
-    return this.botOpenIdValue
   }
 
   /** Send a plain text message to a chat. */
@@ -545,20 +530,6 @@ export class LarkTransport {
       throw asFeishuError('cardkit.v1.card.settings', error)
     }
     this.assertOk(response, 'cardkit.v1.card.settings')
-  }
-
-  /** Fetch and cache the bot's own open id (`bot/v3/info`). */
-  private async resolveBotOpenId(): Promise<void> {    const response = await this.client.request<{
-      code?: number
-      msg?: string
-      data?: { open_id?: string }
-    }>({ method: 'GET', url: '/open-apis/bot/v3/info' })
-    const code = response?.code ?? -1
-    if (code !== 0) {
-      throw new FeishuApiError('bot.v3.info', code, response?.msg ?? 'unknown error')
-    }
-    const openId = response.data?.open_id
-    if (openId !== undefined && openId !== '') this.botOpenIdValue = openId
   }
 
   /** Create a message in a chat; assert the API succeeded. */

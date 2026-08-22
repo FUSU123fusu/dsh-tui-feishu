@@ -339,18 +339,21 @@ ok('finalize during an in-flight flush still closes streaming and pushes the ter
   await sleep(30)
   assert.ok(blocked, 'patch flush is in flight inside stream_element')
 
-  const finalized = await manager.finalize('chat', 'done', { elapsedMs: 1000 }, {
+  // finalize now awaits the in-flight flush's real outcome (so a failed
+  // terminal apply triggers the bridge's plain-text fallback). Start it
+  // WITHOUT awaiting: the blocked flush only finishes after releaseStream.
+  const finalizedPromise = manager.finalize('chat', 'done', { elapsedMs: 1000 }, {
     title: 'hello',
     content: 'work',
     rows: [],
     status: 'done',
   })
-  assert.equal(finalized, true)
   // The in-flight flush is still blocked - the terminal apply must wait for it.
   assert.ok(manager.isActive('chat'), 'card not retired before the terminal apply')
 
   releaseStream()
-  await sleep(50)
+  const finalized = await finalizedPromise
+  assert.equal(finalized, true)
 
   assert.ok(transport.calls.some(call => call[0] === 'cardkitCloseStreaming'), 'streaming closed despite in-flight flush')
   const done = transport.calls.filter(call => call[0] === 'cardkitUpdate')

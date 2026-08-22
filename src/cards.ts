@@ -17,7 +17,7 @@
  */
 
 import type { LarkTransport } from './transport.js'
-import { isTerminalMessageCode, markUnavailable } from './unavailable.js'
+import { isTerminalMessageCode, isUnavailable, markUnavailable } from './unavailable.js'
 import { t, type CardLocale } from './i18n.js'
 import { formatCodeBlock, prettyJsonOrText, splitLongText } from './cardmd.js'
 import { toolDisplayTitle } from './tools.js'
@@ -274,6 +274,8 @@ interface ActiveCard {
   lastFlushed: CardSnapshot | null
   timer: ReturnType<typeof setTimeout> | null
   flushing: boolean
+  /** The in-flight flush's promise, so finalize() can await the real outcome. */
+  flushPromise: Promise<boolean> | undefined
   closed: boolean
   /** Epoch ms of the card's creation. */
   openedAt: number
@@ -363,6 +365,7 @@ export class StreamingCardManager implements CardStream {
       lastFlushed: null,
       timer: null,
       flushing: false,
+      flushPromise: undefined,
       closed: false,
       openedAt: now,
       lastPatchAt: now,
@@ -444,6 +447,8 @@ export class StreamingCardManager implements CardStream {
     }
     const messageId = this.lastMessageIds.get(chatId)
     if (messageId === undefined) return
+    // Skip cards already known to be deleted/recalled.
+    if (isUnavailable(messageId)) return
     try {
       await this.transport.updateCard(messageId, buildCard(snapshot, this.locale))
     } catch (error: unknown) {
@@ -512,13 +517,18 @@ export class StreamingCardManager implements CardStream {
    * snapshots through the same loop.
    */
   private async flush(card: ActiveCard): Promise<boolean> {
-    if (card.flushing) return true
+    // An in-flight flush owns `pending` and applies terminal snapshots
+    // through the same loop - await its REAL result so a failed terminal
+    // patch still triggers the caller's plain-text fallback.
+    if (card.flushing) return card.flushPromise ?? true
     card.flushing = true
-    try {
+    const run = (async (): Promise<boolean> => {
       let applied = false
       while (card.pending !== null) {
         const snapshot = card.pending
         card.pending = null
+        // A message known to be gone (deleted/recalled) fails every patch.
+        if (isUnavailable(card.messageId)) break
         try {
           await this.transport.updateCard(card.messageId, buildCard(snapshot, this.locale))
           card.lastFlushed = snapshot
@@ -530,8 +540,13 @@ export class StreamingCardManager implements CardStream {
         }
       }
       return applied
+    })()
+    card.flushPromise = run
+    try {
+      return await run
     } finally {
       card.flushing = false
+      card.flushPromise = undefined
     }
   }
 }

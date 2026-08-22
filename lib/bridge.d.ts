@@ -111,6 +111,8 @@ export declare class Bridge {
     private readonly approvals;
     private readonly turnDisposers;
     private readonly counters;
+    /** Per-chat serialization of inbound work (messages AND commands). */
+    private readonly chatChains;
     constructor(options: BridgeOptions);
     /** Inbound-message counters for the /feishu status surface. */
     stats(): {
@@ -128,6 +130,12 @@ export declare class Bridge {
     private senderAllowed;
     private dedupe;
     private handleIncoming;
+    /**
+     * Run one chat's inbound tasks one-at-a-time, in arrival order. Failures
+     * are logged and swallowed so one bad task never jams the chain; the chain
+     * entry is dropped once the tail settles.
+     */
+    private enqueueChat;
     private handleCommand;
     /** Best-effort persist of the session map (never breaks a command). */
     private persistMap;

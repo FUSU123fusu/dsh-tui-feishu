@@ -12,6 +12,11 @@ import { isTerminalMessageCode } from '../lib/unavailable.js'
 
 let passed = 0
 const pending = []
+// Unique message ids across every fake transport in this file: the
+// message-unavailable guard is process-global (30min TTL), so reusing an id
+// like 'm0' across tests would make a later card inherit an earlier test's
+// "deleted" mark. (Real Feishu message ids are unique per message.)
+let fakeMsgSeq = 0
 const ok = (name, fn) => {
   const result = fn()
   if (result instanceof Promise) {
@@ -49,7 +54,7 @@ ok('terminal patch failure retires the card and stops patching', async () => {
     onCardAction() {},
     async sendText() {},
     async sendCard(chatId, card) {
-      const id = `m${patches.length}`
+      const id = `m${fakeMsgSeq++}`
       patches.push({ op: 'create', chatId, card, id })
       return id
     },
@@ -84,7 +89,7 @@ ok('idle card is retired by the TTL sweep', async () => {
     onCardAction() {},
     async sendText() {},
     async sendCard(chatId, card) {
-      const id = `m${patches.length}`
+      const id = `m${fakeMsgSeq++}`
       patches.push({ op: 'create', chatId, card, id })
       return id
     },
@@ -122,7 +127,7 @@ ok('tool args/results are redacted on the card and dead cards fall back to text'
       sent.push({ chatId, text })
     },
     async sendCard(chatId, card) {
-      const id = `m${sent.length}`
+      const id = `m${fakeMsgSeq++}`
       sent.push({ chatId, card, id })
       return id
     },

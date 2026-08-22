@@ -250,6 +250,8 @@ export class Bridge {
   private readonly approvals = new Map<string, PendingApproval>()
   private readonly turnDisposers: (() => void)[] = []
   private readonly counters = { received: 0, delivered: 0, dropped: 0 }
+  /** Per-chat serialization of inbound work (messages AND commands). */
+  private readonly chatChains = new Map<string, Promise<void>>()
 
   constructor(private readonly options: BridgeOptions) {}
 
@@ -278,9 +280,16 @@ export class Bridge {
   ): void {
     this.turnDisposers.push(
       subscribe((sessionId, event) => {
-        void this.handleSessionEvent(sessionId, event).catch((error: unknown) => {
-          this.options.logger.error(`session event render failed: ${String(error)}`)
-        })
+        // Session events join the same per-chat chain as inbound messages:
+        // a fast tool/call must not overtake the deliver() that is still
+        // opening the streaming card - its patch would hit a not-yet-open
+        // card and be dropped silently (the flaky "tool panel pushed").
+        const chatId = this.options.sessionMap.chatFor(sessionId)
+        if (chatId === undefined) {
+          this.options.logger.warn(`session event for unknown session ${sessionId} ignored (chatFor miss)`)
+          return
+        }
+        void this.enqueueChat(chatId, () => this.handleSessionEvent(sessionId, event))
       }),
     )
   }
@@ -340,11 +349,35 @@ export class Bridge {
       return
     }
     this.counters.delivered += 1
+    // Serialize per chat: without this, two rapid messages on a fresh chat
+    // race through ensureAgent - the second finds the reminted binding but
+    // no live agent, fails resume, deletes the first's pending binding and
+    // creates a second agent; the two creates then stomp each other's
+    // map entry. Commands (/new, /switch) mutate the same state, so they
+    // go through the same chain.
     if (text.startsWith('/')) {
-      await this.handleCommand(message.chatId, text)
-      return
+      return this.enqueueChat(message.chatId, () => this.handleCommand(message.chatId, text))
     }
-    await this.deliver(message.chatId, text)
+    return this.enqueueChat(message.chatId, () => this.deliver(message.chatId, text))
+  }
+
+  /**
+   * Run one chat's inbound tasks one-at-a-time, in arrival order. Failures
+   * are logged and swallowed so one bad task never jams the chain; the chain
+   * entry is dropped once the tail settles.
+   */
+  private enqueueChat(chatId: string, task: () => Promise<void>): Promise<void> {
+    const tail = this.chatChains.get(chatId) ?? Promise.resolve()
+    const next = tail.then(() =>
+      task().catch((error: unknown) => {
+        this.options.logger.error(`chat task failed: ${String(error)}`)
+      }),
+    )
+    this.chatChains.set(chatId, next)
+    void next.then(() => {
+      if (this.chatChains.get(chatId) === next) this.chatChains.delete(chatId)
+    })
+    return next
   }
 
   private async handleCommand(chatId: string, line: string): Promise<void> {
@@ -660,9 +693,7 @@ export class Bridge {
 
   /** ReminderStore callback: deliver the reminder as a normal agent turn. */
   fireReminder(reminder: Reminder): void {
-    void this.deliver(reminder.chatId, `⏰ 定时提醒：${reminder.text}`).catch((error: unknown) => {
-      this.options.logger.error(`reminder delivery failed: ${String(error)}`)
-    })
+    void this.enqueueChat(reminder.chatId, () => this.deliver(reminder.chatId, `⏰ 定时提醒：${reminder.text}`))
   }
 
   /** `/model` — show the effective route, or pin a new one for this chat. */
@@ -805,10 +836,11 @@ export class Bridge {
           ...(binding.effort === undefined ? {} : { effort: binding.effort }),
         })
       } catch (error: unknown) {
+        // Keep the binding (and its /sessions history): remint below mints a
+        // fresh active session while the unresumable one stays in the list.
         this.options.logger.warn(
           `resume of session ${binding.sessionId} failed (${String(error)}); rebinding fresh`,
         )
-        map.delete(chatId)
       }
     }
     // remint keeps a previous cwd and pinned route/effort; the map persists
@@ -962,13 +994,17 @@ export class Bridge {
           const row = rows[matched]
           if (row !== undefined && row.kind === 'tool') {
             // Sanitize by the tool's kind when known; always redact
-            // credential-shaped text as a base layer.
-            const sanitizer = resolveToolDescriptor(row.name)?.sanitizer
+            // credential-shaped text as a base layer. Tools flagged noResult
+            // (read/write/fetch…) render no result body on the card.
+            const descriptor = resolveToolDescriptor(row.name)
+            const sanitizer = descriptor?.sanitizer
             const rawResult = extractResultText(data.message)
             const resultText =
-              sanitizer === undefined
-                ? redactInlineSecrets(rawResult)
-                : sanitizeToolDetail(rawResult, sanitizer)
+              descriptor?.noResult === true && !error
+                ? ''
+                : sanitizer === undefined
+                  ? redactInlineSecrets(rawResult)
+                  : sanitizeToolDetail(rawResult, sanitizer)
             const rawError =
               typeof data.error === 'string'
                 ? data.error
@@ -1201,7 +1237,13 @@ export class Bridge {
       return
     }
     if (kind === 'stop') {
-      // The ⏹ Stop button on a chat's active streaming card cancels that chat's agent.
+      // The ⏹ Stop button on a chat's active streaming card cancels that
+      // chat's agent. Cards can be forwarded, so check the operator like
+      // every other action does.
+      if (!this.senderAllowed(action.operatorOpenId)) {
+        this.options.logger.warn(`stop from unauthorized operator ${action.operatorOpenId} ignored`)
+        return
+      }
       for (const [chatId, turn] of this.turns) {
         if (this.options.cards.activeMessageId(chatId) !== action.messageId) continue
         const agent = this.options.agentStore.get(turn.sessionId)

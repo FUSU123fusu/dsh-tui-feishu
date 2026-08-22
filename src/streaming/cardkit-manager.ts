@@ -37,6 +37,8 @@ interface KitCard {
   pending: CardSnapshot | null
   timer: ReturnType<typeof setTimeout> | null
   flushing: boolean
+  /** The in-flight flush's promise, so finalize() can await the real outcome. */
+  flushPromise: Promise<boolean> | undefined
   closed: boolean
   /** A terminal snapshot was staged while a patch flush was in flight; the
    *  in-flight flush must apply it with terminal semantics (close streaming +
@@ -77,8 +79,11 @@ function rowsKey(rows: readonly CardRow[]): string {
 
 export class CardKitStreamingManager implements CardStream {
   private readonly active = new Map<string, KitCard>()
-  /** The most recent CardKit card per chat, for the detail toggle on finished cards. */
-  private readonly lastCards = new Map<string, { cardId: string; messageId: string }>()
+  /** The most recent CardKit card per chat, for the detail toggle on finished
+   *  cards. `seq` tracks the last applied mutation: CardKit sequences must
+   *  increase per card for the card's whole life, so post-finalize updates
+   *  continue from here instead of restarting at 1. */
+  private readonly lastCards = new Map<string, { cardId: string; messageId: string; seq: number }>()
   private readonly throttleMs: number
   private readonly cardTtlMs: number
   private readonly locale: CardLocale
@@ -114,7 +119,7 @@ export class CardKitStreamingManager implements CardStream {
     const card = buildCardKitStreamingCard(snapshot, this.locale, { showReasoning: this.showReasoning })
     const cardId = await this.transport.cardkitCreate(card)
     const messageId = await this.transport.cardkitSendToChat(chatId, cardId)
-    this.lastCards.set(chatId, { cardId, messageId })
+    this.lastCards.set(chatId, { cardId, messageId, seq: 1 })
     const now = Date.now()
     this.active.set(chatId, {
       chatId,
@@ -128,6 +133,7 @@ export class CardKitStreamingManager implements CardStream {
       pending: null,
       timer: null,
       flushing: false,
+      flushPromise: undefined,
       closed: false,
       terminalRequested: false,
       streamClosed: false,
@@ -180,9 +186,11 @@ export class CardKitStreamingManager implements CardStream {
       // streaming + full update) and retires the card. Without this flag the
       // terminal snapshot is applied by the NON-terminal branch - content
       // streams fine but streaming mode is never closed, so the card stays in
-      // "working" state on Feishu forever (the reported bug).
+      // "working" state on Feishu forever (the reported bug). Await the
+      // flush's REAL result so a failed terminal apply still triggers the
+      // caller's plain-text fallback.
       card.terminalRequested = true
-      return true
+      return card.flushPromise ?? true
     }
     const ok = await this.flush(card, { terminal: true })
     this.active.delete(chatId)
@@ -212,7 +220,12 @@ export class CardKitStreamingManager implements CardStream {
     if (last === undefined) return
     try {
       const card = buildCardKitCompleteCard(snapshot, this.locale, { showReasoning: this.showReasoning })
-      await this.transport.cardkitUpdate(last.cardId, card, 1)
+      // CardKit sequences must increase for the card's whole life - continue
+      // from the last applied mutation, not from 1 (a smaller sequence is
+      // rejected and the detail toggle silently no-ops).
+      const seq = last.seq + 1
+      await this.transport.cardkitUpdate(last.cardId, card, seq)
+      this.lastCards.set(chatId, { ...last, seq })
     } catch (error: unknown) {
       this.logger.warn(`cardkit refresh failed: ${String(error)}`)
     }
@@ -227,9 +240,9 @@ export class CardKitStreamingManager implements CardStream {
   }
 
   private async flush(card: KitCard, options: { terminal?: boolean } = {}): Promise<boolean> {
-    if (card.flushing) return true
+    if (card.flushing) return card.flushPromise ?? true
     card.flushing = true
-    try {
+    const run = (async (): Promise<boolean> => {
       while (card.pending !== null) {
         const snapshot = card.pending
         card.pending = null
@@ -245,8 +258,13 @@ export class CardKitStreamingManager implements CardStream {
         }
       }
       return true
+    })()
+    card.flushPromise = run
+    try {
+      return await run
     } finally {
       card.flushing = false
+      card.flushPromise = undefined
     }
   }
 
@@ -279,6 +297,7 @@ export class CardKitStreamingManager implements CardStream {
         card.seq += 1
         await this.transport.cardkitUpdate(card.cardId, finalCard, card.seq)
         card.lastSnapshot = snapshot
+        this.lastCards.set(card.chatId, { cardId: card.cardId, messageId: card.messageId, seq: card.seq })
         this.logger.info(
           `cardkit card finalized: chat=${card.chatId} msg=${card.messageId} status=${snapshot.status} elements=${(finalCard.body as { elements?: unknown[] }).elements?.length ?? 0}`,
         )
@@ -343,6 +362,7 @@ export class CardKitStreamingManager implements CardStream {
         }
       }
       card.lastSnapshot = snapshot
+      this.lastCards.set(card.chatId, { cardId: card.cardId, messageId: card.messageId, seq: card.seq })
       return true
     } catch (error: unknown) {
       // Structural/terminal failures retire the card: the bridge falls back

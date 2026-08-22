@@ -19,7 +19,10 @@ import type { LarkTransport } from '../transport.js';
 export declare class CardKitStreamingManager implements CardStream {
     private readonly transport;
     private readonly active;
-    /** The most recent CardKit card per chat, for the detail toggle on finished cards. */
+    /** The most recent CardKit card per chat, for the detail toggle on finished
+     *  cards. `seq` tracks the last applied mutation: CardKit sequences must
+     *  increase per card for the card's whole life, so post-finalize updates
+     *  continue from here instead of restarting at 1. */
     private readonly lastCards;
     private readonly throttleMs;
     private readonly cardTtlMs;

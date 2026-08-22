@@ -28,8 +28,6 @@ export interface FeishuMessage {
     readonly chatType: 'p2p' | 'group';
     readonly senderOpenId: string;
     readonly text: string;
-    /** Open ids of users @-mentioned in the message (bot excluded by caller). */
-    readonly mentions: readonly string[];
 }
 /** A normalized card-button callback. */
 export interface FeishuCardAction {
@@ -100,7 +98,6 @@ export declare class LarkTransport {
     private actionHandler;
     private readonly logger;
     private connectionStateValue;
-    private botOpenIdValue;
     constructor(credentials: FeishuCredentials, logger?: TransportLogger);
     /** The live long-connection state. */
     connectionState(): 'starting' | 'ready' | 'reconnecting' | 'error';
@@ -112,8 +109,6 @@ export declare class LarkTransport {
     onMessage(handler: (message: FeishuMessage) => void): void;
     /** Register the single card-button handler. */
     onCardAction(handler: (action: FeishuCardAction) => void): void;
-    /** The bot's own open id, or `undefined` until resolved. */
-    getBotOpenId(): string | undefined;
     /** Send a plain text message to a chat. */
     sendText(chatId: string, text: string): Promise<void>;
     /** Send an interactive card; resolves with the created message id. */
@@ -143,8 +138,6 @@ export declare class LarkTransport {
     cardkitUpdate(cardId: string, card: unknown, sequence: number): Promise<void>;
     /** Turn streaming mode off (required before the final full update). */
     cardkitCloseStreaming(cardId: string, sequence: number): Promise<void>;
-    /** Fetch and cache the bot's own open id (`bot/v3/info`). */
-    private resolveBotOpenId;
     /** Create a message in a chat; assert the API succeeded. */
     private createMessage;
     private assertOk;
