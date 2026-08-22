@@ -11,8 +11,21 @@ import { FeishuApiError } from '../lib/transport.js'
 import { isTerminalMessageCode } from '../lib/unavailable.js'
 
 let passed = 0
+const pending = []
 const ok = (name, fn) => {
-  fn()
+  const result = fn()
+  if (result instanceof Promise) {
+    // Async cases: defer the pass log until the promise settles, so a failed
+    // assertion rejects the run deterministically instead of escaping into
+    // an uncaught rejection after the summary line.
+    pending.push(
+      result.then(() => {
+        passed += 1
+        console.log(`${name}: true`)
+      }),
+    )
+    return
+  }
   passed += 1
   console.log(`${name}: true`)
 }
@@ -203,4 +216,5 @@ ok('tool args/results are redacted on the card and dead cards fall back to text'
   cards.dispose()
 })
 
+await Promise.all(pending)
 console.log(`ROBUSTNESS OK (${passed} checks)`)

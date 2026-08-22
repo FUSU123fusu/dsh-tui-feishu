@@ -11,8 +11,21 @@ import { normalizeCardAction } from '../lib/transport.js'
 import { SessionMap } from '../lib/session-map.js'
 
 let passed = 0
+const pending = []
 const ok = (name, fn) => {
-  fn()
+  const result = fn()
+  if (result instanceof Promise) {
+    // Async cases: defer the pass log until the promise settles, so a failed
+    // assertion rejects the run deterministically instead of escaping into
+    // an uncaught rejection after the summary line.
+    pending.push(
+      result.then(() => {
+        passed += 1
+        console.log(`${name}: true`)
+      }),
+    )
+    return
+  }
   passed += 1
   console.log(`${name}: true`)
 }
@@ -347,4 +360,5 @@ ok('finalize during an in-flight flush still closes streaming and pushes the ter
   manager.dispose()
 })
 
+await Promise.all(pending)
 console.log(`CARDKIT OK (${passed} checks)`)

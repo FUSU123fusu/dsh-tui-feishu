@@ -162,6 +162,15 @@ export declare class Bridge {
     private deliver;
     /** Live agent for the chat's bound session, resuming or creating as needed. */
     private ensureAgent;
+    /**
+     * Open a turn state for events that arrive BEFORE turn/start or before
+     * the Feishu-message path finishes opening its card: handleMessage awaits
+     * agent create/resume and session-map persistence before turns.set, so a
+     * fast tool/call or assistant chunk can win the race. Returning early
+     * drops the row from the card for good; open the turn late instead.
+     * Queued titles are consumed the same way as the turn/start path.
+     */
+    private openLateTurn;
     /** Fold one session event into the owning chat's streaming card. */
     private handleSessionEvent;
     private syncCard;

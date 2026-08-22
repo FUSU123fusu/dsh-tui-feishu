@@ -828,6 +828,28 @@ export class Bridge {
     return agent
   }
 
+  /**
+   * Open a turn state for events that arrive BEFORE turn/start or before
+   * the Feishu-message path finishes opening its card: handleMessage awaits
+   * agent create/resume and session-map persistence before turns.set, so a
+   * fast tool/call or assistant chunk can win the race. Returning early
+   * drops the row from the card for good; open the turn late instead.
+   * Queued titles are consumed the same way as the turn/start path.
+   */
+  private async openLateTurn(chatId: string, sessionId: string): Promise<TurnState> {
+    const queue = this.queuedTurns.get(chatId)
+    const queuedTitle = queue !== undefined && queue.length > 0 ? queue.shift() : undefined
+    if (queue !== undefined && queue.length === 0) this.queuedTurns.delete(chatId)
+    const state: TurnState = { title: queuedTitle ?? '⏰ Agent', content: '', rows: [], openThink: false, expanded: false, sessionId, startedAt: Date.now(), toolStarts: new Map() }
+    this.turns.set(chatId, state)
+    try {
+      await this.options.cards.open(chatId, state.title)
+    } catch (error: unknown) {
+      this.options.logger.warn(`late-opened turn card failed: ${String(error)}`)
+    }
+    return state
+  }
+
   /** Fold one session event into the owning chat's streaming card. */
   private async handleSessionEvent(sessionId: string, event: SessionEvent): Promise<void> {
     const chatId = this.options.sessionMap.chatFor(sessionId)
@@ -863,7 +885,7 @@ export class Bridge {
         return
       }
       case 'assistant/chunk': {
-        if (state === undefined) return
+        if (state === undefined) state = await this.openLateTurn(chatId, sessionId)
         const chunk = data.chunk as { type?: string; text?: string } | undefined
         if (chunk?.type === 'text-delta' && typeof chunk.text === 'string') {
           // Deltas may carry reasoning tags; strip them so internal thinking
@@ -895,7 +917,7 @@ export class Bridge {
         return
       }
       case 'tool/call': {
-        if (state === undefined) return
+        if (state === undefined) state = await this.openLateTurn(chatId, sessionId)
         state.openThink = false
         const args = String(data.arguments ?? '')
         const callId = data.callId === undefined ? undefined : String(data.callId)
@@ -918,7 +940,7 @@ export class Bridge {
         return
       }
       case 'tool/result': {
-        if (state === undefined) return
+        if (state === undefined) state = await this.openLateTurn(chatId, sessionId)
         const message = data.message as
           | { content?: Array<{ toolCallId?: string }> }
           | undefined
@@ -974,7 +996,7 @@ export class Bridge {
         return
       }
       case 'assistant/message': {
-        if (state === undefined) return
+        if (state === undefined) state = await this.openLateTurn(chatId, sessionId)
         state.openThink = false
         const text = stripReasoningTags(
           assistantText((data.message as { content?: readonly unknown[] } | undefined)?.content),
