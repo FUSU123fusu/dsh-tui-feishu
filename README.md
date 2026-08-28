@@ -25,16 +25,16 @@ Feishu (Lark) remote-control surface for [dsh-TUI](https://github.com/ccch1mneyy
 
 ## 安装
 
-```bash
-# 在 dsh-TUI 的 profile 里安装（或任意 dsh profile）
-dsh plugin --profile dsh-tui add dsh-tui-feishu
+暂未发布到 npm，从 GitHub Release 下载 tgz 安装：
 
-# 从源码：构建并打包后本地安装
-npm run verify && npm pack
-dsh plugin --profile dsh-tui add file:dsh-tui-feishu-0.3.1.tgz
+```bash
+# 1. 下载（或到 Releases 页选最新版）：
+#    https://github.com/FUSU123fusu/dsh-tui-feishu/releases/download/v0.3.1/dsh-tui-feishu-0.3.1.tgz
+# 2. 本地安装（路径换成实际下载位置）：
+dsh plugin --profile dsh-tui add file:C:\path\to\dsh-tui-feishu-0.3.1.tgz
 ```
 
-> 也可以直接从 [GitHub Releases](https://github.com/FUSU123fusu/dsh-tui-feishu/releases) 下载最新 tgz。
+从源码：构建并打包后本地安装 `npm run verify && npm pack`，然后 `dsh plugin --profile dsh-tui add file:dsh-tui-feishu-0.3.1.tgz`。
 
 ## 扫码配对（推荐）
 
